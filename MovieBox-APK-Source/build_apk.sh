@@ -21,7 +21,7 @@ $BT/aapt2 link -o $BUILD/base.apk \
   -I $PLAT/android.jar \
   --manifest AndroidManifest.xml \
   --min-sdk-version 21 --target-sdk-version 34 \
-  --version-code 1 --version-name 1.0 \
+  --version-code 3 --version-name 1.2 \
   -R $BUILD/res.zip \
   --auto-add-overlay
 

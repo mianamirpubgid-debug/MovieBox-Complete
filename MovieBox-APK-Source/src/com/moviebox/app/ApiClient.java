@@ -41,11 +41,25 @@ public class ApiClient {
     public static final String IMG_REFERER = "https://api.inmoviebox.com/";
 
     public static final String[] CLUSTERS = {
+            "https://api6.aoneroom.com",      // proven working worldwide (original app uses it)
             "https://api.inmoviebox.com",
             "https://apig.inmoviebox.com",
             "https://api5.aoneroom.com",
-            "https://api6.aoneroom.com",
     };
+
+    /** first cluster that ever returned code:0 — always tried first afterwards */
+    private static volatile String sBestCluster = "";
+
+    /** ordered clusters: best (sticky) first, then the rest in declared order */
+    private static List<String> orderedClusters() {
+        List<String> out = new ArrayList<>();
+        String best = sBestCluster;
+        if (best != null && best.length() > 0) out.add(best);
+        for (String c : CLUSTERS) {
+            if (!out.contains(c)) out.add(c);
+        }
+        return out;
+    }
 
     public static final String[] TRAP_PATTERNS = {
             "macdn.aoneroom.com", "please_update", "update_app",
@@ -225,15 +239,26 @@ public class ApiClient {
         synchronized (LOCK) {
             long TTL = 1000L * 60 * 60 * 20;
             if (!force && sToken.length() > 0 && System.currentTimeMillis() - sTokenAt < TTL) return;
-            JSONObject res = rawRequest("POST", "/wefeed-mobile-bff/user-api/visitor-login",
-                    new HashMap<String, String>(), "{}", true, CLUSTERS[0]);
-            if (res != null && res.optInt("code", -1) == 0 && res.optJSONObject("data") != null) {
-                String t = res.optJSONObject("data").optString("token", "");
-                if (t.length() > 0) {
-                    sToken = t;
-                    sTokenAt = System.currentTimeMillis();
+            // rotate through every cluster until visitor-login succeeds
+            for (String base : orderedClusters()) {
+                JSONObject res;
+                try {
+                    res = rawRequest("POST", "/wefeed-mobile-bff/user-api/visitor-login",
+                            new HashMap<String, String>(), "{}", true, base);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (res != null && res.optInt("code", -1) == 0 && res.optJSONObject("data") != null) {
+                    String t = res.optJSONObject("data").optString("token", "");
+                    if (t.length() > 0) {
+                        sToken = t;
+                        sTokenAt = System.currentTimeMillis();
+                        if (sBestCluster.length() == 0) sBestCluster = base;
+                        return;
+                    }
                 }
             }
+            throw new Exception("all clusters failed on visitor-login");
         }
     }
 
@@ -276,11 +301,13 @@ public class ApiClient {
         String bodyStr = body != null ? body : "";
 
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(15000);
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(12000);
         conn.setRequestMethod(method.toUpperCase());
         conn.setRequestProperty("User-Agent", UA);
         conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8");
+        conn.setRequestProperty("X-M-Version", "4.0.02");
         conn.setRequestProperty("Accept-Language", "en-IN,hi-IN;q=0.9,en;q=0.8");
         conn.setRequestProperty("X-Sign-Version", "2.0");
         conn.setRequestProperty("appid", APP_ID);
@@ -349,7 +376,7 @@ public class ApiClient {
 
     public static byte[] fetchImage(String url) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15000);
+        conn.setConnectTimeout(10000);
         conn.setReadTimeout(20000);
         conn.setRequestProperty("User-Agent", UA);
         conn.setRequestProperty("Referer", IMG_REFERER);
@@ -363,10 +390,14 @@ public class ApiClient {
     }
 
     // ---------- request with path healing + cluster rotation + 401 recovery ----------
+    // NOTE: rotation is ALWAYS on — every cluster is tried until one answers code:0.
     public static JSONObject mbRequest(String method, String endpoint,
                                        Map<String, String> params, String body,
                                        boolean rotate) throws Exception {
-        ensureGuestToken(false);
+        try {
+            ensureGuestToken(false);
+        } catch (Exception ignored) {
+        }
         List<String> tryEndpoints = new ArrayList<>();
         tryEndpoints.add(endpoint);
         if (endpoint.startsWith("/wefeed-mobile-bff/")) {
@@ -374,32 +405,37 @@ public class ApiClient {
         } else {
             tryEndpoints.add("/wefeed-mobile-bff" + endpoint);
         }
-        String[] bases = rotate ? CLUSTERS : new String[]{CLUSTERS[0]};
+        List<String> bases = orderedClusters();
         JSONObject last = null;
-        for (String base : bases) {
-            for (String ep : tryEndpoints) {
-                JSONObject res;
-                try {
-                    res = rawRequest(method, ep, params, body, false, base);
-                } catch (Exception e) {
-                    continue;
-                }
-                if (res != null) {
-                    int code = res.optInt("code", -1);
-                    String msg = res.optString("msg", "");
-                    if (code == 401 || msg.contains("JWT token has expired") || msg.contains("Unauthorized")) {
-                        try {
-                            ensureGuestToken(true);
-                        } catch (Exception ignored) {
-                        }
-                        try {
-                            res = rawRequest(method, ep, params, body, false, base);
-                        } catch (Exception ignored) {
+        for (int attempt = 0; attempt < 2; attempt++) {           // 2 full rounds max
+            for (String base : bases) {
+                for (String ep : tryEndpoints) {
+                    JSONObject res;
+                    try {
+                        res = rawRequest(method, ep, params, body, false, base);
+                    } catch (Exception e) {
+                        continue;
+                    }
+                    if (res != null) {
+                        int code = res.optInt("code", -1);
+                        String msg = res.optString("msg", "") + res.optString("message", "");
+                        if (code == 401 || msg.contains("JWT token has expired") || msg.contains("Unauthorized")) {
+                            try {
+                                ensureGuestToken(true);
+                            } catch (Exception ignored) {
+                            }
+                            try {
+                                res = rawRequest(method, ep, params, body, false, base);
+                            } catch (Exception ignored) {
+                            }
                         }
                     }
+                    if (res != null && res.optInt("code", -1) == 0 && res.has("data")) {
+                        sBestCluster = base;                       // remember working cluster
+                        return res;
+                    }
+                    last = res;
                 }
-                if (res != null && res.optInt("code", -1) == 0 && res.has("data")) return res;
-                last = res;
             }
         }
         return last != null ? last : new JSONObject("{\"code\":-1,\"msg\":\"no response\"}");
