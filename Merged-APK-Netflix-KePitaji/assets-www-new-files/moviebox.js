@@ -115,7 +115,16 @@
       if (!d || !d.ok || !d.rows || !d.rows.length) return;
       var box = document.getElementById("nf-rows") || rowsBox;
       if (!box || !box.isConnected) return;
-      d.rows.forEach(function (row) {
+      /* respect the active feed chip: Movies -> only movie rows, Shows -> only series rows */
+      var feed = (window.__NF_state && window.__NF_state.feed) || "home";
+      var rowsArr = (d.rows || []).filter(function (row) {
+        var it0 = (row.items || [])[0];
+        var isSeriesRow = !!(it0 && it0.s);
+        if (feed === "movies") return !isSeriesRow;
+        if (feed === "shows") return isSeriesRow;
+        return true;
+      });
+      rowsArr.forEach(function (row) {
         var wrap = document.createElement("div");
         wrap.className = "nf-fade mb-row";
         var head = document.createElement("div");
