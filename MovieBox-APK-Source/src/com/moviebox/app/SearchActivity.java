@@ -3,233 +3,241 @@ package com.moviebox.app;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
-import android.widget.AbsListView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.BaseAdapter;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.ArrayList;
-import java.util.List;
-
-/** Search page — searchV2 API + poster grid. */
+/**
+ * Search v2 — fixed parsing (data.results[].subjects), live debounced search,
+ * poster grid results with fade-in, professional empty states.
+ */
 public class SearchActivity extends Activity {
 
-    private GridView grid;
-    private TextView statusView;
-    private List<JSONObject> results = new ArrayList<>();
-    private BaseAdapter adapter;
-    private String query = "";
-    private int page = 1;
-    private boolean loading = false;
+    private static final int BG = Color.parseColor("#0B0C10");
+    private static final int SURFACE = Color.parseColor("#14161D");
+    private static final int ACCENT = Color.parseColor("#E50914");
+
+    private EditText input;
+    private LinearLayout resultsGrid;
+    private FrameLayout loadingBox;
+    private TextView emptyText;
+    private LinearLayout dotsWrap;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private Runnable pendingSearch;
+    private int lastSeq = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        CacheManager.init(this);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.parseColor("#0F1115"));
+        root.setBackgroundColor(BG);
 
-        // ---- search bar ----
+        // ---- top search bar ----
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(12), dp(10), dp(12), dp(10));
-        bar.setBackgroundColor(Color.parseColor("#171A20"));
+        bar.setPadding(dp(12), dp(12), dp(12), dp(12));
+        bar.setBackgroundColor(Color.parseColor("#101218"));
 
-        final EditText input = new EditText(this);
-        input.setHint("Search movies, series…");
-        input.setHintTextColor(Color.parseColor("#777777"));
+        ImageView back = new ImageView(this);
+        back.setImageResource(R.drawable.ic_back);
+        back.setPadding(dp(6), dp(6), dp(12), dp(6));
+        Anim.press(back);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { finish(); }
+        });
+        bar.addView(back);
+
+        FrameLayout searchWrap = new FrameLayout(this);
+        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+        gd.setColor(SURFACE);
+        gd.setCornerRadius(dp(22));
+        searchWrap.setBackground(gd);
+        searchWrap.setPadding(dp(14), dp(2), dp(10), dp(2));
+
+        input = new EditText(this);
+        input.setHint("Movies, series, actors…");
+        input.setHintTextColor(Color.parseColor("#6B7280"));
         input.setTextColor(Color.WHITE);
-        input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
+        input.setBackgroundColor(Color.TRANSPARENT);
         input.setSingleLine(true);
         input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        input.setBackgroundColor(Color.parseColor("#2A2E36"));
-        input.setPadding(dp(12), dp(10), dp(12), dp(10));
-        bar.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-
-        TextView go = new TextView(this);
-        go.setText("🔍");
-        go.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 20);
-        go.setPadding(dp(12), dp(6), dp(8), dp(6));
-        go.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                doSearch(input.getText().toString().trim());
+        input.setPadding(0, dp(10), 0, dp(10));
+        searchWrap.addView(input, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL));
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (pendingSearch != null) ui.removeCallbacks(pendingSearch);
+                final String q = s.toString().trim();
+                if (q.length() < 2) { showIdle(); return; }
+                pendingSearch = new Runnable() {
+                    @Override public void run() { doSearch(q); }
+                };
+                ui.postDelayed(pendingSearch, 450);
             }
         });
-        bar.addView(go);
-        input.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-            @Override
-            public boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent event) {
-                if (actionId == EditorInfo.IME_ACTION_SEARCH) {
-                    doSearch(input.getText().toString().trim());
-                    return true;
-                }
-                return false;
-            }
-        });
+        input.requestFocus();
 
-        root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams swlp = new LinearLayout.LayoutParams(0, dp(44), 1);
+        bar.addView(searchWrap, swlp);
+        root.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        statusView = new TextView(this);
-        statusView.setTextColor(Color.parseColor("#9AA0A6"));
-        statusView.setPadding(dp(16), dp(12), dp(16), dp(12));
-        statusView.setText("Movie ya series ka naam likhein…");
-        root.addView(statusView);
+        // ---- loading dots ----
+        loadingBox = new FrameLayout(this);
+        dotsWrap = new LinearLayout(this);
+        dotsWrap.setGravity(Gravity.CENTER);
+        dotsWrap.addView(Anim.loadingDots(this, ACCENT));
+        loadingBox.addView(dotsWrap, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        loadingBox.setVisibility(View.GONE);
+        root.addView(loadingBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(80)));
 
-        grid = new GridView(this);
-        grid.setNumColumns(3);
-        grid.setBackgroundColor(Color.parseColor("#0F1115"));
-        grid.setPadding(dp(8), dp(8), dp(8), dp(8));
-        grid.setVerticalSpacing(dp(10));
-        grid.setHorizontalSpacing(dp(10));
-        grid.setAdapter(adapter = new BaseAdapter() {
-            @Override
-            public int getCount() {
-                return results.size();
-            }
+        // ---- empty text ----
+        emptyText = new TextView(this);
+        emptyText.setText("Movie ya series search karein…");
+        emptyText.setTextColor(Color.parseColor("#6B7280"));
+        emptyText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
+        emptyText.setGravity(Gravity.CENTER);
+        emptyText.setPadding(dp(20), dp(40), dp(20), dp(20));
+        root.addView(emptyText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            @Override
-            public Object getItem(int position) {
-                return results.get(position);
-            }
+        // ---- results grid ----
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        resultsGrid = new LinearLayout(this);
+        resultsGrid.setOrientation(LinearLayout.VERTICAL);
+        resultsGrid.setPadding(dp(8), dp(4), dp(8), dp(16));
+        scroll.addView(resultsGrid, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
-            @Override
-            public long getItemId(int position) {
-                return position;
-            }
-
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                FrameLayout fl;
-                if (convertView instanceof FrameLayout) {
-                    fl = (FrameLayout) convertView;
-                } else {
-                    fl = new FrameLayout(SearchActivity.this);
-                }
-                int pw = (int) ((getResources().getDisplayMetrics().widthPixels - dp(38)) / 3f);
-                int ph = (int) (pw * 1.42f);
-
-                ImageView iv;
-                TextView cap;
-                if (fl.getChildCount() == 2) {
-                    iv = (ImageView) fl.getChildAt(0);
-                    cap = (TextView) fl.getChildAt(1);
-                } else {
-                    fl.removeAllViews();
-                    iv = new ImageView(SearchActivity.this);
-                    iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                    iv.setBackgroundColor(Color.parseColor("#1A1D24"));
-                    fl.addView(iv, new FrameLayout.LayoutParams(pw, ph));
-                    cap = new TextView(SearchActivity.this);
-                    cap.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10);
-                    cap.setTextColor(Color.parseColor("#DDDDDD"));
-                    cap.setBackgroundColor(Color.parseColor("#B0000000"));
-                    cap.setMaxLines(1);
-                    cap.setPadding(dp(2), dp(2), dp(2), dp(2));
-                    FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(pw, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-                    fl.addView(cap, clp);
-                }
-
-                JSONObject s = results.get(position);
-                JSONObject info = ApiClient.infoOf(s);
-                String url = ApiClient.coverUrl(info);
-                iv.setImageDrawable(null);
-                ImageLoader.load(url, iv);
-                cap.setText(info.optString("title", ""));
-                return fl;
-            }
-        });
-        grid.setOnItemClickListener(new android.widget.AdapterView.OnItemClickListener() {
-            @Override
-            public void onItemClick(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                JSONObject s = results.get(position);
-                JSONObject info = ApiClient.infoOf(s);
-                String sid = info.optString("subjectId", "");
-                if (!sid.isEmpty()) {
-                    Intent it = new Intent(SearchActivity.this, DetailActivity.class);
-                    it.putExtra("subjectId", sid);
-                    startActivity(it);
-                }
-            }
-        });
-        grid.setOnScrollListener(new AbsListView.OnScrollListener() {
-            @Override
-            public void onScrollStateChanged(AbsListView view, int scrollState) {
-            }
-
-            @Override
-            public void onScroll(AbsListView view, int firstVisibleItem, int visibleItemCount, int totalItemCount) {
-                if (!loading && !query.isEmpty() && totalItemCount > 0 && firstVisibleItem + visibleItemCount >= totalItemCount - 3) {
-                    page++;
-                    searchPage();
-                }
-            }
-        });
-
-        root.addView(grid, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
     }
 
-    private void doSearch(String q) {
-        if (q.isEmpty()) return;
-        query = q;
-        page = 1;
-        results.clear();
-        adapter.notifyDataSetChanged();
-        statusView.setText("Searching “" + q + "”…");
-        searchPage();
+    private void showIdle() {
+        loadingBox.setVisibility(View.GONE);
+        emptyText.setVisibility(View.VISIBLE);
+        emptyText.setText("Movie ya series search karein…");
+        resultsGrid.removeAllViews();
     }
 
-    private void searchPage() {
-        loading = true;
-        final int p = page;
+    private void doSearch(final String q) {
+        final int seq = ++lastSeq;
+        emptyText.setVisibility(View.GONE);
+        loadingBox.setVisibility(View.VISIBLE);
+        resultsGrid.removeAllViews();
+
         ApiClient.async(new ApiClient.BgTask<JSONArray>() {
-            @Override
-            public JSONArray run() {
-                try {
-                    JSONObject res = ApiClient.searchV2(query, p);
-                    JSONObject data = res.optJSONObject("data");
-                    if (data == null) return new JSONArray();
-                    JSONArray list = data.optJSONArray("list");
-                    if (list == null) list = data.optJSONArray("items");
-                    if (list == null) list = data.optJSONArray("subjects");
-                    return list == null ? new JSONArray() : list;
-                } catch (Exception e) {
-                    return new JSONArray();
-                }
+            @Override public JSONArray run() {
+                try { return ApiClient.searchResults(q, 1); } catch (Exception e) { return new JSONArray(); }
             }
         }, new ApiClient.UiTask<JSONArray>() {
-            @Override
-            public void onDone(JSONArray list) {
-                loading = false;
-                int before = results.size();
-                for (int i = 0; i < list.length(); i++) {
-                    JSONObject s = list.optJSONObject(i);
-                    if (s != null) results.add(s);
+            @Override public void onDone(JSONArray items) {
+                if (seq != lastSeq) return; // stale response
+                loadingBox.setVisibility(View.GONE);
+                if (items == null || items.length() == 0) {
+                    emptyText.setVisibility(View.VISIBLE);
+                    emptyText.setText("\"" + q + "\" ke liye kuch nahi mila.\nSpelling check karein ya dusra naam try karein.");
+                    Anim.fadeIn(emptyText, 250);
+                    return;
                 }
-                statusView.setVisibility(View.GONE);
-                adapter.notifyDataSetChanged();
-                if (results.isEmpty()) {
-                    statusView.setVisibility(View.VISIBLE);
-                    statusView.setText("Kuch nahi mila — spelling check karein ya English mein search karein.");
-                }
+                renderResults(items);
             }
         });
+    }
+
+    private void renderResults(JSONArray items) {
+        resultsGrid.removeAllViews();
+        int n = getResources().getDisplayMetrics().widthPixels;
+        int cellW = (n - dp(24)) / 3;
+        int cellH = (int) (cellW * 1.42f) + dp(22);
+
+        LinearLayout row = null;
+        for (int i = 0; i < items.length(); i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setPadding(dp(4), dp(2), dp(4), dp(2));
+                resultsGrid.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            JSONObject s = items.optJSONObject(i);
+            if (s == null) continue;
+            String sid = s.optString("subjectId", "");
+            if (sid.isEmpty()) continue;
+            final String fSid = sid;
+
+            LinearLayout cell = new LinearLayout(this);
+            cell.setOrientation(LinearLayout.VERTICAL);
+            cell.setClickable(true);
+            Anim.press(cell);
+
+            FrameLayout fl = new FrameLayout(this);
+            ImageView iv = new ImageView(this);
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            iv.setBackgroundColor(SURFACE);
+            fl.addView(iv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            ImageLoader.load(ApiClient.coverUrl(s), iv);
+            try {
+                fl.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                    @Override public void getOutline(View view, android.graphics.Outline outline) {
+                        outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), dp(10));
+                    }
+                });
+                fl.setClipToOutline(true);
+            } catch (Exception ignored) {}
+            cell.addView(fl, new LinearLayout.LayoutParams(cellW - dp(8), cellH - dp(22)));
+
+            TextView cap = new TextView(this);
+            cap.setText(s.optString("title", ""));
+            cap.setTextColor(Color.parseColor("#DDDDDD"));
+            cap.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11);
+            cap.setMaxLines(2);
+            cap.setPadding(dp(3), dp(4), dp(3), 0);
+            cell.addView(cap, new LinearLayout.LayoutParams(cellW - dp(8), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    Intent it = new Intent(SearchActivity.this, DetailActivity.class);
+                    it.putExtra("subjectId", fSid);
+                    startActivity(it);
+                    overridePendingTransition(R.anim.slide_in_bottom, R.anim.fade_out);
+                }
+            });
+
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(cellW, ViewGroup.LayoutParams.WRAP_CONTENT);
+            clp.setMargins(dp(4), dp(4), dp(4), dp(6));
+            row.addView(cell, clp);
+            Anim.fadeIn(cell, 240);
+        }
     }
 
     protected int dp(int v) {

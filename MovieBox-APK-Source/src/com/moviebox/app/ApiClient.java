@@ -527,6 +527,80 @@ public class ApiClient {
                 p("ugcVideoId", ugcVideoId), null, true);
     }
 
+
+    // ---------- flattened search (handles data.results[].subjects shape) ----------
+    public static org.json.JSONArray searchResults(String keyword, int page) throws Exception {
+        JSONObject res = searchV2(keyword, page);
+        org.json.JSONArray out = new org.json.JSONArray();
+        java.util.HashSet<String> seen = new java.util.HashSet<String>();
+        if (res.optInt("code", -1) != 0) return out;
+        JSONObject d = res.optJSONObject("data");
+        if (d == null) return out;
+        Object raw = d.opt("results");
+        if (!(raw instanceof org.json.JSONArray)) return out;
+        org.json.JSONArray groups = (org.json.JSONArray) raw;
+        for (int i = 0; i < groups.length(); i++) {
+            JSONObject g = groups.optJSONObject(i);
+            if (g == null) continue;
+            org.json.JSONArray subs = g.optJSONArray("subjects");
+            if (subs == null) continue;
+            for (int j = 0; j < subs.length(); j++) {
+                JSONObject s = subs.optJSONObject(j);
+                if (s == null) continue;
+                JSONObject info = infoOf(s);
+                String sid = info.optString("subjectId", "");
+                if (sid.isEmpty() || !seen.add(sid)) continue;
+                String cov = coverUrl(info);
+                if (cov.isEmpty()) continue; // only items with posters
+                out.put(info);
+            }
+        }
+        return out;
+    }
+
+    public static class HomeData {
+        public JSONObject movies;   // tabId 2
+        public JSONObject series;   // tabId 5
+        public boolean fromCache = false;
+    }
+
+    /** fast home load: cached-first, then fresh (stale-while-revalidate) */
+    public static HomeData loadHome() {
+        HomeData hd = new HomeData();
+        String cached = CacheManager.apiGet("home_v2");
+        if (cached != null && cached.length() > 0) {
+            try {
+                JSONObject o = new JSONObject(cached);
+                hd.movies = o.optJSONObject("movies");
+                hd.series = o.optJSONObject("series");
+                hd.fromCache = hd.movies != null;
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            JSONObject movies = getTabOperating("2", 1);
+            JSONObject series = null;
+            try {
+                series = getTabOperating("5", 1);
+            } catch (Exception ignored) {
+            }
+            if (movies != null && movies.optInt("code", -1) == 0) {
+                hd.movies = movies;
+                hd.series = (series != null && series.optInt("code", -1) == 0) ? series : hd.series;
+                hd.fromCache = false;
+                try {
+                    JSONObject save = new JSONObject();
+                    save.put("movies", hd.movies);
+                    save.put("series", hd.series == null ? JSONObject.NULL : hd.series);
+                    CacheManager.apiPut("home_v2", save.toString());
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return hd;
+    }
+
     // ---------- subject helpers ----------
     public static String coverUrl(JSONObject subject) {
         Object cover = subject.opt("cover");
